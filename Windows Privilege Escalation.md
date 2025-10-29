@@ -115,3 +115,79 @@ To change the policy globally:
 - `Get-ExecutionPolicy -Scope CurrentUser # Show the Current execution Policy`
 - `Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope CurrentUser # Change the EP`
 
+# Audit Commands
+
+## 1. Check Audit Policy Status
+
+View all audit policy settings
+auditpol /get /category:*
+
+List all subcategories for granular audit configuration
+auditpol /list /subcategory:*
+
+## 2. Set/Enable Key Audit Policies
+
+Enable auditing for successful and failed logon attempts
+auditpol /set /subcategory:"Logon" /success:enable /failure:enable
+
+Enable auditing for privilege use
+auditpol /set /subcategory:"Privilege Use" /success:enable /failure:enable
+
+Enable file system object auditing
+auditpol /set /subcategory:"File System" /success:enable /failure:enable
+
+
+## 3. Audit File/Folder Access
+
+- GUI: Right-click folder > Properties > Security > Advanced > Auditing > Add
+- CLI example for setting audit rules on a folder (using icacls):
+  
+icacls "C:\SensitiveData" /setaudit S-1-1-0:(0x1301f)
+
+## 4. Check User and Group Memberships
+
+List all local administrators
+net localgroup administrators
+
+List members of a group
+Get-LocalGroupMember -Group "Administrators"
+
+
+## 5. Check Service and Registry Permissions
+
+List services with unquoted paths (potential privilege escalation risk)
+wmic service get name,displayname,pathname,startmode | findstr /i "Auto" | findstr /i /v "C:\Windows\" | findstr /i /v "C:\Program Files\"
+
+Find world-writable registry keys (using accesschk from Sysinternals)
+accesschk.exe -wuv -k HKLM
+
+
+## 6. Check for Missing Patches
+
+List installed hotfixes
+wmic qfe get Caption,Description,HotFixID,InstalledOn
+
+
+## 7. Review Scheduled Tasks
+
+Get scheduled tasks basic info
+schtasks /query /fo LIST /v
+
+Detailed scheduled task info
+Get-ScheduledTask | Get-ScheduledTaskInfo
+
+
+## 8. List Running Processes with Command Lines
+
+Get-WmiObject Win32_Process | select ProcessId,CommandLine | Format-List
+
+
+
+## 9. Review Group Policy Results
+
+gpresult /h C:\gpresult.html
+
+Open the HTML report for reviewing applied policies and audit settings
+
+
+
